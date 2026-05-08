@@ -10,12 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iputils-ping \
     jq \
     python3 \
-    python3-pip \
+    python3-pandas \
+    python3-matplotlib \
     bash \
     coreutils \
     gawk \
     && rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m pip install --no-cache-dir pandas matplotlib
 
 WORKDIR /workspace
