@@ -82,6 +82,14 @@ http2-http3-experiment/
 - `mixed-page`: `index.html` + related small and medium resources.
 - `large-file`: large single object download.
 
+Traffic note:
+- `scripts/run_experiment.sh` uses per-workload request counts.
+- Defaults: `REQUESTS_SMALL_STATIC=1000`, `REQUESTS_MIXED_PAGE=1000`, `REQUESTS_LARGE_FILE=20`.
+- Override via env vars, for example:
+```bash
+REQUESTS_LARGE_FILE=10 REPEATS=3 ./scripts/run_experiment.sh
+```
+
 ## CSV Format
 
 Raw CSV: `results/raw/results_raw.csv`

@@ -7,7 +7,10 @@ RAW_DIR="${RESULTS_DIR}/raw"
 RAW_CSV="${RAW_DIR}/results_raw.csv"
 ANALYZE_SCRIPT="${ROOT_DIR}/scripts/analyze.py"
 
-REQUESTS="${REQUESTS:-1000}"
+# Per-workload request counts. Keep latency-focused workloads high, cap large-file traffic.
+REQUESTS_SMALL_STATIC="${REQUESTS_SMALL_STATIC:-1000}"
+REQUESTS_MIXED_PAGE="${REQUESTS_MIXED_PAGE:-1000}"
+REQUESTS_LARGE_FILE="${REQUESTS_LARGE_FILE:-20}"
 CONCURRENCY_LIST=(10 50 100)
 REPEATS="${REPEATS:-5}"
 TARGET_HOST="${TARGET_HOST:-server}"
@@ -35,7 +38,8 @@ if [[ "${QUICK_MODE}" == "true" ]]; then
   )
 fi
 
-WORKLOADS=("small-static" "mixed-page" "large-file")
+WORKLOADS_CSV="${WORKLOADS_CSV:-small-static,mixed-page,large-file}"
+IFS=',' read -r -a WORKLOADS <<< "${WORKLOADS_CSV}"
 if [[ "${QUICK_MODE}" == "true" ]]; then
   WORKLOADS=("small-static")
 fi
@@ -74,7 +78,17 @@ build_input_file() {
       done
       ;;
     large-file)
-      echo "${TARGET_URL}large/large_01.bin" >> "${file}"
+      local large_rel="large/large_01.bin"
+      if [[ ! -f "${ROOT_DIR}/data/${large_rel}" ]]; then
+        local first_large
+        first_large="$(find "${ROOT_DIR}/data/large" -maxdepth 1 -type f -name 'large_*.bin' | sort | head -n 1 || true)"
+        if [[ -z "${first_large}" ]]; then
+          echo "ERROR: no large files found in ${ROOT_DIR}/data/large. Run scripts/generate_data.sh first." >&2
+          exit 1
+        fi
+        large_rel="large/$(basename "${first_large}")"
+      fi
+      echo "${TARGET_URL}${large_rel}" >> "${file}"
       ;;
     *)
       echo "Unknown workload: ${workload}" >&2
@@ -87,39 +101,63 @@ build_input_file() {
 
 parse_h2load() {
   local output_file="$1"
-  python3 - "$output_file" <<'PY'
+  local log_file="$2"
+  local expected_requests="$3"
+  python3 - "$output_file" "$log_file" "$expected_requests" <<'PY'
+import math
 import re
 import sys
 from pathlib import Path
 
-text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="ignore")
+out_text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="ignore")
+log_path = Path(sys.argv[2])
+expected = int(sys.argv[3])
 
-def find(pattern, default=""):
-    m = re.search(pattern, text, re.MULTILINE)
-    return m.group(1) if m else default
+latencies_ms = []
+successful = 0
+completed = 0
 
-succeeded = find(r"requests:\s*\d+ total,.*?,\s*(\d+) succeeded", "0")
-failed = find(r"requests:\s*\d+ total,.*?,\s*\d+ succeeded,\s*(\d+) failed", "0")
-avg = find(r"time for request:\s*([0-9]*\.?[0-9]+)ms", "")
-rps = find(r"finished in\s*[0-9]*\.?[0-9]+\w*,\s*([0-9]*\.?[0-9]+) req/s", "")
-total = find(r"finished in\s*([0-9]*\.?[0-9]+)(ms|s)", "")
-total_unit = find(r"finished in\s*[0-9]*\.?[0-9]+(ms|s)", "ms")
+if log_path.exists():
+    for line in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            status = int(parts[1])
+            duration_us = float(parts[2])
+        except ValueError:
+            continue
+        completed += 1
+        latencies_ms.append(duration_us / 1000.0)
+        if 200 <= status < 400:
+            successful += 1
 
-p50 = find(r"^\s*50%\s*([0-9]*\.?[0-9]+)ms", "") or find(r"^\s*50\s+([0-9]*\.?[0-9]+)ms", "")
-p95 = find(r"^\s*95%\s*([0-9]*\.?[0-9]+)ms", "") or find(r"^\s*95\s+([0-9]*\.?[0-9]+)ms", "")
-p99 = find(r"^\s*99%\s*([0-9]*\.?[0-9]+)ms", "") or find(r"^\s*99\s+([0-9]*\.?[0-9]+)ms", "")
+failed = max(expected - successful, 0)
 
-if total:
-    total_val = float(total)
-    if total_unit == "s":
-        total_val *= 1000
-    total_ms = f"{total_val:.3f}"
+def pct(values, percentile):
+    if not values:
+        return ""
+    values = sorted(values)
+    idx = max(0, min(len(values) - 1, math.ceil((percentile / 100.0) * len(values)) - 1))
+    return f"{values[idx]:.3f}"
+
+avg = f"{(sum(latencies_ms) / len(latencies_ms)):.3f}" if latencies_ms else ""
+p50 = pct(latencies_ms, 50)
+p95 = pct(latencies_ms, 95)
+p99 = pct(latencies_ms, 99)
+
+unit_factor = {"us": 0.001, "ms": 1.0, "s": 1000.0, "m": 60000.0, "h": 3600000.0}
+finished = re.search(r"finished in\s+([0-9]*\.?[0-9]+)(us|ms|s|m|h),\s+([0-9]*\.?[0-9]+)\s+req/s", out_text)
+if finished:
+    total_ms = f"{float(finished.group(1)) * unit_factor[finished.group(2)]:.3f}"
+    rps = finished.group(3)
 else:
     total_ms = ""
+    rps = ""
 
 print(",".join([
-    succeeded,
-    failed,
+    str(successful),
+    str(failed),
     avg,
     p50,
     p95,
@@ -140,35 +178,56 @@ run_single() {
   local run_id="$7"
   local concurrency="$8"
 
-  local alpn
+  local h2load_protocol
   case "${protocol}" in
-    h2) alpn="h2" ;;
-    h3) alpn="h3" ;;
+    h2) h2load_protocol="--alpn-list=h2" ;;
+    h3) h2load_protocol="--alpn-list=h3" ;;
     *) echo "Unknown protocol ${protocol}" >&2; exit 1 ;;
+  esac
+
+  local requests
+  case "${workload}" in
+    small-static) requests="${REQUESTS_SMALL_STATIC}" ;;
+    mixed-page) requests="${REQUESTS_MIXED_PAGE}" ;;
+    large-file) requests="${REQUESTS_LARGE_FILE}" ;;
+    *) echo "Unknown workload: ${workload}" >&2; exit 1 ;;
   esac
 
   local input_file
   input_file="$(build_input_file "${workload}")"
 
+  # h2load requires requests >= clients; clamp concurrency for small request budgets.
+  local effective_concurrency="${concurrency}"
+  if (( effective_concurrency > requests )); then
+    effective_concurrency="${requests}"
+  fi
+
   local out_file
   out_file="$(mktemp)"
+  local log_file
+  log_file="$(mktemp)"
 
   set +e
-  h2load -k --alpn-list="${alpn}" -n "${REQUESTS}" -c "${concurrency}" -m "${concurrency}" -i "${input_file}" "${TARGET_URL}" > "${out_file}" 2>&1
+  h2load "${h2load_protocol}" -n "${requests}" -c "${effective_concurrency}" -m "${effective_concurrency}" \
+    -i "${input_file}" --log-file="${log_file}" "${TARGET_URL}" > "${out_file}" 2>&1
   local h2load_rc=$?
   set -e
 
   local parsed
-  parsed="$(parse_h2load "${out_file}")"
+  if [[ ${h2load_rc} -eq 0 ]]; then
+    parsed="$(parse_h2load "${out_file}" "${log_file}" "${requests}")"
+  else
+    parsed="0,${requests},,,,,,"
+  fi
 
   IFS=',' read -r successful failed avg p50 p95 p99 rps total_ms <<< "${parsed}"
 
   if [[ -z "${successful}" ]]; then successful="0"; fi
-  if [[ -z "${failed}" ]]; then failed="${REQUESTS}"; fi
+  if [[ -z "${failed}" ]]; then failed="${requests}"; fi
 
   local error_rate
   error_rate="$(python3 - <<PY
-req=${REQUESTS}
+req=${requests}
 fail=int('${failed}' or 0)
 print(f"{(fail/req):.6f}")
 PY
@@ -176,14 +235,20 @@ PY
 
   printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
     "${protocol}" "${scenario}" "${delay_ms}" "${jitter_ms}" "${loss_percent}" "${workload}" "${run_id}" \
-    "${REQUESTS}" "${concurrency}" "${successful}" "${failed}" "${avg}" "${p50}" "${p95}" "${p99}" \
+    "${requests}" "${concurrency}" "${successful}" "${failed}" "${avg}" "${p50}" "${p95}" "${p99}" \
     "${rps}" "${total_ms}" "${error_rate}" >> "${RAW_CSV}"
 
   if [[ ${h2load_rc} -ne 0 ]]; then
     echo "WARNING: h2load exited with code ${h2load_rc} for ${protocol}/${scenario}/${workload}/c${concurrency}/run${run_id}" >&2
+    sed -n '1,20p' "${out_file}" >&2
+  elif [[ "${protocol}" == "h3" && "${successful}" == "0" ]]; then
+    echo "ERROR: h2load reported 0 successful requests for HTTP/3 at ${scenario}/${workload}/c${concurrency}/run${run_id}" >&2
+    sed -n '1,40p' "${out_file}" >&2
+    rm -f "${input_file}" "${out_file}" "${log_file}"
+    exit 1
   fi
 
-  rm -f "${input_file}" "${out_file}"
+  rm -f "${input_file}" "${out_file}" "${log_file}"
 }
 
 wait_for_server() {
@@ -200,6 +265,17 @@ wait_for_server() {
 wait_for_server
 "${ROOT_DIR}/scripts/check_protocols.sh"
 "${ROOT_DIR}/scripts/clear_netem.sh"
+
+# Ensure load generator can actually run both protocol modes before long loops.
+if ! h2load --alpn-list=h2 -n 1 -c 1 "${TARGET_URL}" >/dev/null 2>&1; then
+  echo "ERROR: h2load HTTP/2 smoke test failed." >&2
+  exit 1
+fi
+
+if ! h2load --alpn-list=h3 -n 1 -c 1 "${TARGET_URL}" >/dev/null 2>&1; then
+  echo "ERROR: h2load HTTP/3 smoke test failed. Rebuild client image with H3-enabled h2load." >&2
+  exit 1
+fi
 
 for scenario in "${SCENARIOS[@]}"; do
   IFS=',' read -r sc_name delay jitter loss <<< "${scenario}"

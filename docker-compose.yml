@@ -14,9 +14,12 @@ services:
     restart: unless-stopped
 
   client:
+    image: http2-vs-http3-experiment-client:latest
     build:
       context: .
       dockerfile: client/Dockerfile
+      args:
+        BUILD_JOBS: "4"
     container_name: h2h3-client
     cap_add:
       - NET_ADMIN

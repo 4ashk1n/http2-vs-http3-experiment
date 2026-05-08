@@ -41,7 +41,7 @@ for i in $(seq -w 1 20); do
   make_file "${DATA_DIR}/medium/medium_${i}.bin" "${size}" "medium_${i}"
 done
 
-for i in $(seq -w 1 3); do
+for i in $(seq -f "%02g" 1 3); do
   size=$((50 * 1024 * 1024))
   make_file "${DATA_DIR}/large/large_${i}.bin" "${size}" "large_${i}"
 done
