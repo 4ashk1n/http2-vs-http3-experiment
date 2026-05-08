@@ -1,20 +1,18 @@
-﻿FROM ubuntu:24.04
+FROM alpine/curl-http3:8.11.0
 
-ENV DEBIAN_FRONTEND=noninteractive
+USER root
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    nghttp2-client \
-    iproute2 \
-    iputils-ping \
-    jq \
-    python3 \
-    python3-pandas \
-    python3-matplotlib \
+RUN apk add --no-cache \
     bash \
+    ca-certificates \
     coreutils \
     gawk \
-    && rm -rf /var/lib/apt/lists/*
+    iproute2 \
+    iputils \
+    jq \
+    nghttp2 \
+    py3-matplotlib \
+    py3-pandas \
+    python3
 
 WORKDIR /workspace

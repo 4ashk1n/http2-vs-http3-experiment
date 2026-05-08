@@ -1,8 +1,4 @@
-﻿{
-  auto_https disable_redirects
-}
-
-:443 {
+https://server {
   tls internal
   root * /srv
   file_server

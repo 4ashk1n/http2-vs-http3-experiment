@@ -1,4 +1,4 @@
-﻿# HTTP/2 vs HTTP/3 Experiment Stand
+# HTTP/2 vs HTTP/3 Experiment Stand
 
 Experimental stand for reproducible comparison of HTTP/2 and HTTP/3 performance under network degradation (delay, jitter, packet loss).
 
