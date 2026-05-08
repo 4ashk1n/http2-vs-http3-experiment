@@ -2,3 +2,5 @@
 results/raw/*.log
 __pycache__/
 *.pyc
+*.tar
+*.csv
