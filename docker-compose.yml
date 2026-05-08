@@ -1,0 +1,34 @@
+﻿
+services:
+  server:
+    image: caddy:2.8-alpine
+    container_name: h2h3-server
+    ports:
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: h2h3-client
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./scripts:/workspace/scripts
+      - ./results:/workspace/results
+      - ./data:/workspace/data:ro
+    working_dir: /workspace
+    command: ["tail", "-f", "/dev/null"]
+    depends_on:
+      - server
+
+volumes:
+  caddy_data:
+  caddy_config:

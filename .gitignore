@@ -1,0 +1,4 @@
+﻿results/raw/*.tmp
+results/raw/*.log
+__pycache__/
+*.pyc
